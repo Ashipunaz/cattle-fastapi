@@ -4,13 +4,13 @@ import threading
 import logging
 import tensorflow as tf
 from tensorflow.keras.optimizers import Adam
-from pathlib import Path
+import numpy as np
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Build path relative to main.py (project root), not this file
+# Build path relative to main.py (project root)
 BASE_DIR    = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODEL_DIR   = os.path.join(BASE_DIR, "models")
 ACTIVE_DIR  = os.path.join(MODEL_DIR, "active")
@@ -31,23 +31,30 @@ logger.info(f"BASE_DIR: {BASE_DIR}")
 logger.info(f"ACTIVE_DIR: {ACTIVE_DIR}")
 logger.info(f"TensorFlow version: {tf.__version__}")
 
-# Check if active directory exists and list contents
+# Check active directory
 if os.path.exists(ACTIVE_DIR):
     files = os.listdir(ACTIVE_DIR)
-    logger.info(f"Files in active directory ({len(files)}): {files}")
+    logger.info(f"Files in active directory: {files}")
     
-    # Check for the specific .keras file
-    keras_file_path = os.path.join(ACTIVE_DIR, KERAS_FILE)
-    if os.path.exists(keras_file_path):
-        file_size = os.path.getsize(keras_file_path)
+    # Detailed check for .keras file
+    keras_path = os.path.join(ACTIVE_DIR, KERAS_FILE)
+    if os.path.exists(keras_path):
+        file_size = os.path.getsize(keras_path)
         logger.info(f"Found {KERAS_FILE} - Size: {file_size} bytes")
-        logger.info(f"File permissions: Readable={os.access(keras_file_path, os.R_OK)}")
+        
+        # Check if it's a valid zip file
+        try:
+            import zipfile
+            with zipfile.ZipFile(keras_path, 'r') as zip_ref:
+                file_list = zip_ref.namelist()
+                logger.info(f"Valid zip file. Contents: {file_list[:5]}...")
+        except Exception as e:
+            logger.error(f"File exists but is NOT a valid zip file: {e}")
     else:
-        logger.warning(f"{KERAS_FILE} NOT FOUND in active directory!")
+        logger.error(f"{KERAS_FILE} NOT FOUND!")
 else:
     logger.error(f"ACTIVE_DIR does not exist: {ACTIVE_DIR}")
     os.makedirs(ACTIVE_DIR, exist_ok=True)
-    logger.info(f"Created ACTIVE_DIR: {ACTIVE_DIR}")
 logger.info("=" * 50)
 
 
@@ -56,166 +63,212 @@ def get_active_version() -> str:
     version_file = os.path.join(ACTIVE_DIR, "version.txt")
     if os.path.exists(version_file):
         with open(version_file) as f:
-            version = f.read().strip()
-            logger.info(f"Active version from file: {version}")
-            return version
-    logger.info("No version.txt found, using default v1.0")
+            return f.read().strip()
     return "v1.0"
 
 
-def _load_from_disk():
-    """Load the model from disk with fallback options."""
-    global _model, _model_version
-    
-    logger.info("=" * 50)
-    logger.info("LOADING MODEL FROM DISK")
-    
-    # Ensure directories exist
-    os.makedirs(ACTIVE_DIR, exist_ok=True)
-    
-    # Define all possible model file paths
-    keras_paths = [
-        os.path.join(ACTIVE_DIR, KERAS_FILE),      # cattle_final.keras
-        os.path.join(ACTIVE_DIR, "model.keras"),    # model.keras
-    ]
-    
-    arch_path = os.path.join(ACTIVE_DIR, ARCH_FILE)
-    weights_path = os.path.join(ACTIVE_DIR, WEIGHTS_FILE)
-    
-    # Log all paths we're checking
-    logger.info(f"Checking for model files in: {ACTIVE_DIR}")
-    logger.info(f"  - {KERAS_FILE}: {os.path.exists(keras_paths[0])}")
-    logger.info(f"  - model.keras: {os.path.exists(keras_paths[1])}")
-    logger.info(f"  - {ARCH_FILE}: {os.path.exists(arch_path)}")
-    logger.info(f"  - {WEIGHTS_FILE}: {os.path.exists(weights_path)}")
-    
-    # Try to find a valid .keras file
-    keras_path = None
-    for path in keras_paths:
-        if os.path.exists(path):
-            file_size = os.path.getsize(path)
-            logger.info(f"Found .keras file: {path} (size: {file_size} bytes)")
-            if file_size > 0:  # Make sure it's not empty
-                keras_path = path
-                break
-            else:
-                logger.warning(f"Found but file is empty: {path}")
-    
-    model = None
-    load_error = None
-    
-    # Method 1: Load from .keras file (preferred)
-    if keras_path:
+def load_with_custom_objects(model_path):
+    """Load model with custom objects handling."""
+    try:
+        # Define custom objects if needed
+        custom_objects = {}
+        
+        # Try loading with different options
         try:
-            logger.info(f"Attempting to load from .keras: {keras_path}")
+            # Method 1: Standard load
+            model = tf.keras.models.load_model(model_path)
+            logger.info("Method 1: Standard load successful")
+            return model
+        except Exception as e1:
+            logger.warning(f"Method 1 failed: {e1}")
             
-            # Try loading with different options
             try:
-                # First attempt: standard load
-                model = tf.keras.models.load_model(keras_path)
-                logger.info("Successfully loaded .keras file (standard method)")
-            except Exception as e1:
-                logger.warning(f"Standard load failed: {str(e1)}")
+                # Method 2: Load without compilation
+                model = tf.keras.models.load_model(model_path, compile=False)
+                logger.info("Method 2: Load with compile=False successful")
                 
-                # Second attempt: load without compilation
-                logger.info("Attempting to load with compile=False")
-                model = tf.keras.models.load_model(keras_path, compile=False)
-                logger.info("Successfully loaded .keras file with compile=False")
-                
-                # Compile the model
+                # Compile with default settings
                 model.compile(
                     optimizer=Adam(learning_rate=1e-5),
                     loss="categorical_crossentropy",
                     metrics=["accuracy"]
                 )
-                logger.info("Model compiled successfully")
+                return model
+            except Exception as e2:
+                logger.warning(f"Method 2 failed: {e2}")
                 
+                try:
+                    # Method 3: Load with custom objects
+                    model = tf.keras.models.load_model(
+                        model_path, 
+                        custom_objects=custom_objects,
+                        compile=False
+                    )
+                    logger.info("Method 3: Load with custom objects successful")
+                    
+                    model.compile(
+                        optimizer=Adam(learning_rate=1e-5),
+                        loss="categorical_crossentropy",
+                        metrics=["accuracy"]
+                    )
+                    return model
+                except Exception as e3:
+                    logger.error(f"All loading methods failed. Last error: {e3}")
+                    raise
+    except Exception as e:
+        logger.error(f"Failed to load model from {model_path}: {e}")
+        raise
+
+
+def create_model_from_weights():
+    """Create model from architecture JSON and weights file."""
+    arch_path = os.path.join(ACTIVE_DIR, ARCH_FILE)
+    weights_path = os.path.join(ACTIVE_DIR, WEIGHTS_FILE)
+    
+    if not (os.path.exists(arch_path) and os.path.exists(weights_path)):
+        raise FileNotFoundError(f"Missing JSON or weights files")
+    
+    logger.info("Creating model from JSON architecture and weights")
+    
+    # Load architecture
+    with open(arch_path, 'r') as f:
+        config = json.load(f)
+    
+    # Fix configuration
+    def fix_config(obj):
+        if isinstance(obj, dict):
+            if obj.get('class_name') == 'InputLayer':
+                cfg = obj.get('config', {})
+                if 'batch_input_shape' in cfg and 'shape' not in cfg:
+                    cfg['shape'] = cfg['batch_input_shape'][1:]
+                elif 'shape' not in cfg:
+                    cfg['shape'] = (224, 224, 3)
+            
+            for key in ['groups', 'batch_input_shape']:
+                obj.pop(key, None)
+            
+            for v in obj.values():
+                fix_config(v)
+        elif isinstance(obj, list):
+            for item in obj:
+                fix_config(item)
+    
+    fix_config(config)
+    
+    # Create model
+    try:
+        model = tf.keras.Model.from_config(config)
+        logger.info("Model created from config")
+    except Exception as e:
+        logger.error(f"Failed to create model from config: {e}")
+        raise
+    
+    # Load weights
+    try:
+        model.load_weights(weights_path)
+        logger.info("Weights loaded successfully")
+    except Exception as e:
+        logger.error(f"Failed to load weights: {e}")
+        raise
+    
+    # Compile
+    model.compile(
+        optimizer=Adam(learning_rate=1e-5),
+        loss="categorical_crossentropy",
+        metrics=["accuracy"]
+    )
+    
+    return model
+
+
+def _load_from_disk():
+    """Load the model from disk with multiple fallback strategies."""
+    global _model, _model_version
+    
+    logger.info("=" * 50)
+    logger.info("LOADING MODEL FROM DISK")
+    
+    # Ensure directory exists
+    os.makedirs(ACTIVE_DIR, exist_ok=True)
+    
+    keras_path = os.path.join(ACTIVE_DIR, KERAS_FILE)
+    arch_path = os.path.join(ACTIVE_DIR, ARCH_FILE)
+    weights_path = os.path.join(ACTIVE_DIR, WEIGHTS_FILE)
+    
+    # Log file status
+    logger.info(f"Checking files in {ACTIVE_DIR}:")
+    logger.info(f"  - {KERAS_FILE}: {os.path.exists(keras_path)}")
+    logger.info(f"  - {ARCH_FILE}: {os.path.exists(arch_path)}")
+    logger.info(f"  - {WEIGHTS_FILE}: {os.path.exists(weights_path)}")
+    
+    model = None
+    
+    # Strategy 1: Try loading .keras file
+    if os.path.exists(keras_path):
+        try:
+            logger.info(f"Strategy 1: Loading .keras file: {keras_path}")
+            model = load_with_custom_objects(keras_path)
         except Exception as e:
-            load_error = e
-            logger.error(f"Failed to load .keras file: {str(e)}")
-            logger.info("Will attempt fallback to JSON+weights")
+            logger.error(f"Strategy 1 failed: {e}")
             model = None
     
-    # Method 2: Fallback to JSON + weights
+    # Strategy 2: Create from JSON + weights
     if model is None and os.path.exists(arch_path) and os.path.exists(weights_path):
         try:
-            logger.info("Attempting fallback: Loading from JSON + weights")
+            logger.info("Strategy 2: Creating model from JSON + weights")
+            model = create_model_from_weights()
             
-            with open(arch_path, 'r') as f:
-                config = json.load(f)
+            # Save as .keras for future loads
+            try:
+                model.save(keras_path)
+                logger.info(f"Saved model as {keras_path} for future loads")
+            except Exception as save_err:
+                logger.warning(f"Could not save .keras file: {save_err}")
+                
+        except Exception as e:
+            logger.error(f"Strategy 2 failed: {e}")
+            model = None
+    
+    # Strategy 3: Try loading with safe mode
+    if model is None and os.path.exists(keras_path):
+        try:
+            logger.info("Strategy 3: Attempting safe mode loading")
+            import h5py
             
-            # Fix configuration for compatibility
-            def fix_config(obj):
-                if isinstance(obj, dict):
-                    # Handle InputLayer configuration
-                    if obj.get('class_name') == 'InputLayer':
-                        cfg = obj.get('config', {})
-                        if 'batch_input_shape' in cfg and 'shape' not in cfg:
-                            cfg['shape'] = cfg['batch_input_shape'][1:]
-                        elif 'shape' not in cfg:
-                            cfg['shape'] = (224, 224, 3)
-                    
-                    # Remove problematic keys
-                    for key in ['groups', 'batch_input_shape']:
-                        obj.pop(key, None)
-                    
-                    # Recursively process values
-                    for v in obj.values():
-                        fix_config(v)
-                        
-                elif isinstance(obj, list):
-                    for item in obj:
-                        fix_config(item)
+            # Try to open as H5 file
+            with h5py.File(keras_path, 'r') as f:
+                logger.info(f"File opens as H5. Keys: {list(f.keys())}")
             
-            fix_config(config)
+            # Try loading with experimental flags
+            model = tf.keras.models.load_model(
+                keras_path,
+                compile=False,
+                safe_mode=False
+            )
+            logger.info("Strategy 3 successful")
             
-            # Create model from config
-            model = tf.keras.Model.from_config(config)
-            logger.info("Model created from config")
-            
-            # Load weights
-            model.load_weights(weights_path)
-            logger.info("Weights loaded successfully")
-            
-            # Compile model
             model.compile(
                 optimizer=Adam(learning_rate=1e-5),
                 loss="categorical_crossentropy",
                 metrics=["accuracy"]
             )
-            logger.info("Model compiled successfully")
-            
-            # Save as .keras for future loads
-            try:
-                save_path = os.path.join(ACTIVE_DIR, "model.keras")
-                model.save(save_path)
-                logger.info(f"Saved model as {save_path} for future loads")
-            except Exception as save_err:
-                logger.warning(f"Could not save .keras file: {save_err}")
-                
         except Exception as e:
-            load_error = e
-            logger.error(f"Fallback loading failed: {str(e)}")
+            logger.error(f"Strategy 3 failed: {e}")
             model = None
     
-    # If no model loaded, raise detailed error
+    # If still no model, raise error
     if model is None:
         error_msg = f"Failed to load model from {ACTIVE_DIR}. "
-        
-        # List all files for debugging
         if os.path.exists(ACTIVE_DIR):
             files = os.listdir(ACTIVE_DIR)
-            error_msg += f"Directory contents: {files}"
+            file_sizes = {f: os.path.getsize(os.path.join(ACTIVE_DIR, f)) for f in files}
+            error_msg += f"Files and sizes: {file_sizes}"
         else:
-            error_msg += f"Directory does not exist!"
-        
-        if load_error:
-            error_msg += f" Last error: {str(load_error)}"
+            error_msg += "Directory does not exist!"
         
         logger.error(error_msg)
         raise FileNotFoundError(error_msg)
     
-    # Store the loaded model
     _model = model
     _model_version = get_active_version()
     
@@ -257,11 +310,9 @@ def list_versions():
         if not os.path.isdir(folder_path):
             continue
         
-        # Check for weights file
         weights = os.path.join(folder_path, WEIGHTS_FILE)
         size_kb = os.path.getsize(weights) / 1024 if os.path.exists(weights) else 0
         
-        # Get modification time
         import datetime
         mtime = os.path.getmtime(folder_path)
         
@@ -279,45 +330,30 @@ def list_versions():
 def activate_version(version: str):
     """Activate a specific model version."""
     import shutil
-    import datetime
     
     version_path = os.path.join(VERSION_DIR, version)
     if not os.path.isdir(version_path):
-        raise ValueError(f"Version '{version}' not found in {VERSION_DIR}")
+        raise ValueError(f"Version '{version}' not found")
     
     logger.info(f"Activating version: {version}")
-    
-    # Create active directory if it doesn't exist
     os.makedirs(ACTIVE_DIR, exist_ok=True)
     
-    # Copy model files
-    files_copied = []
+    # Copy files
     for fname in [ARCH_FILE, WEIGHTS_FILE, KERAS_FILE]:
         src = os.path.join(version_path, fname)
-        dst = os.path.join(ACTIVE_DIR, fname)
         if os.path.exists(src):
-            shutil.copy2(src, dst)
-            files_copied.append(fname)
-            logger.info(f"Copied {fname} to active directory")
+            shutil.copy2(src, os.path.join(ACTIVE_DIR, fname))
+            logger.info(f"Copied {fname}")
     
-    # Clean up any existing .keras files to avoid confusion
+    # Clean up
     for fname in ["model.keras", KERAS_FILE]:
         p = os.path.join(ACTIVE_DIR, fname)
-        if os.path.exists(p) and fname not in files_copied:
+        if os.path.exists(p):
             os.remove(p)
-            logger.info(f"Removed {fname} from active directory")
     
-    # Update version file
+    # Update version
     with open(os.path.join(ACTIVE_DIR, "version.txt"), "w") as f:
         f.write(version)
     
-    # Reload model
     reload_model()
-    logger.info(f"Version {version} activated successfully")
-    
     return version
-
-
-# Optional: Pre-load model on import
-# Uncomment the line below if you want to load the model immediately when this module is imported
-# _load_from_disk()

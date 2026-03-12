@@ -18,7 +18,7 @@ VERSION_DIR = os.path.join(MODEL_DIR, "versions")
 
 ARCH_FILE    = "cattle_final_archi.json"
 WEIGHTS_FILE = "cattle_final.weights.h5"
-KERAS_FILE   = "cattle_final.keras"
+KERAS_FILE   = "cattle_final.keras"  # optional; loader no longer depends on this
 
 _model         = None
 _model_lock    = threading.Lock()
@@ -182,101 +182,46 @@ def create_model_from_weights():
 
 
 def _load_from_disk():
-    """Load the model from disk with multiple fallback strategies."""
+    """Load the model from disk using JSON architecture + weights only."""
     global _model, _model_version
-    
+
     logger.info("=" * 50)
-    logger.info("LOADING MODEL FROM DISK")
-    
+    logger.info("LOADING MODEL FROM DISK (JSON + WEIGHTS ONLY)")
+
     # Ensure directory exists
     os.makedirs(ACTIVE_DIR, exist_ok=True)
-    
-    keras_path = os.path.join(ACTIVE_DIR, KERAS_FILE)
+
     arch_path = os.path.join(ACTIVE_DIR, ARCH_FILE)
     weights_path = os.path.join(ACTIVE_DIR, WEIGHTS_FILE)
-    
+
     # Log file status
     logger.info(f"Checking files in {ACTIVE_DIR}:")
-    logger.info(f"  - {KERAS_FILE}: {os.path.exists(keras_path)}")
     logger.info(f"  - {ARCH_FILE}: {os.path.exists(arch_path)}")
     logger.info(f"  - {WEIGHTS_FILE}: {os.path.exists(weights_path)}")
-    
-    model = None
-    
-    # Strategy 1: Try loading .keras file
-    if os.path.exists(keras_path):
-        try:
-            logger.info(f"Strategy 1: Loading .keras file: {keras_path}")
-            model = load_with_custom_objects(keras_path)
-        except Exception as e:
-            logger.error(f"Strategy 1 failed: {e}")
-            model = None
-    
-    # Strategy 2: Create from JSON + weights
-    if model is None and os.path.exists(arch_path) and os.path.exists(weights_path):
-        try:
-            logger.info("Strategy 2: Creating model from JSON + weights")
-            model = create_model_from_weights()
-            
-            # Save as .keras for future loads
-            try:
-                model.save(keras_path)
-                logger.info(f"Saved model as {keras_path} for future loads")
-            except Exception as save_err:
-                logger.warning(f"Could not save .keras file: {save_err}")
-                
-        except Exception as e:
-            logger.error(f"Strategy 2 failed: {e}")
-            model = None
-    
-    # Strategy 3: Try loading with safe mode
-    if model is None and os.path.exists(keras_path):
-        try:
-            logger.info("Strategy 3: Attempting safe mode loading")
-            import h5py
-            
-            # Try to open as H5 file
-            with h5py.File(keras_path, 'r') as f:
-                logger.info(f"File opens as H5. Keys: {list(f.keys())}")
-            
-            # Try loading with experimental flags
-            model = tf.keras.models.load_model(
-                keras_path,
-                compile=False,
-                safe_mode=False
-            )
-            logger.info("Strategy 3 successful")
-            
-            model.compile(
-                optimizer=Adam(learning_rate=1e-5),
-                loss="categorical_crossentropy",
-                metrics=["accuracy"]
-            )
-        except Exception as e:
-            logger.error(f"Strategy 3 failed: {e}")
-            model = None
-    
-    # If still no model, raise error
-    if model is None:
-        error_msg = f"Failed to load model from {ACTIVE_DIR}. "
+
+    if not (os.path.exists(arch_path) and os.path.exists(weights_path)):
+        error_msg = (
+            f"Missing model files in {ACTIVE_DIR}. "
+            f"Expected {ARCH_FILE} and {WEIGHTS_FILE}."
+        )
         if os.path.exists(ACTIVE_DIR):
             files = os.listdir(ACTIVE_DIR)
             file_sizes = {f: os.path.getsize(os.path.join(ACTIVE_DIR, f)) for f in files}
-            error_msg += f"Files and sizes: {file_sizes}"
-        else:
-            error_msg += "Directory does not exist!"
-        
+            error_msg += f" Files present: {file_sizes}"
         logger.error(error_msg)
         raise FileNotFoundError(error_msg)
-    
+
+    # Always load from JSON + weights
+    model = create_model_from_weights()
+
     _model = model
     _model_version = get_active_version()
-    
+
     logger.info(f"Model loaded successfully. Version: {_model_version}")
     logger.info(f"Model input shape: {model.input_shape}")
     logger.info(f"Model output shape: {model.output_shape}")
     logger.info("=" * 50)
-    
+
     return model
 
 
@@ -338,15 +283,15 @@ def activate_version(version: str):
     logger.info(f"Activating version: {version}")
     os.makedirs(ACTIVE_DIR, exist_ok=True)
     
-    # Copy files
+    # Copy required files (JSON + weights). Keras file is optional.
     for fname in [ARCH_FILE, WEIGHTS_FILE, KERAS_FILE]:
         src = os.path.join(version_path, fname)
         if os.path.exists(src):
             shutil.copy2(src, os.path.join(ACTIVE_DIR, fname))
             logger.info(f"Copied {fname}")
     
-    # Clean up
-    for fname in ["model.keras", KERAS_FILE]:
+    # Clean up any legacy model filename that might conflict
+    for fname in ["model.keras"]:
         p = os.path.join(ACTIVE_DIR, fname)
         if os.path.exists(p):
             os.remove(p)

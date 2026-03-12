@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from routers import predict, history, admin
 from utils.model_loader import get_model
 import uvicorn
+import logging
 
 app = FastAPI(
     title="Cattle Disease Detection API",
@@ -41,8 +42,17 @@ app.include_router(admin.router,    prefix="/api/admin", tags=["Admin"])
 
 @app.on_event("startup")
 def load_model_on_startup():
-    # Load the TensorFlow model once at startup so first requests are fast
-    get_model()
+    """
+    Attempt to load the TensorFlow model once at startup so first requests are fast.
+    If loading fails (e.g. out of memory), log the error but still allow the app to start,
+    so that health endpoints work and we can debug from logs.
+    """
+    logger = logging.getLogger("uvicorn.error")
+    try:
+        get_model()
+        logger.info("Model loaded successfully at startup.")
+    except Exception as exc:
+        logger.error("Model failed to load at startup; will retry on first request.", exc_info=exc)
 
 
 @app.get("/", tags=["Health"])

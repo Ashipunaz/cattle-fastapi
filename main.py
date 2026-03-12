@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from routers import predict, history, admin
+from utils.model_loader import get_model
 import uvicorn
 
 app = FastAPI(
@@ -36,6 +37,12 @@ app.add_middleware(
 app.include_router(predict.router,  prefix="/api", tags=["Prediction"])
 app.include_router(history.router,  prefix="/api", tags=["History"])
 app.include_router(admin.router,    prefix="/api/admin", tags=["Admin"])
+
+
+@app.on_event("startup")
+def load_model_on_startup():
+    # Load the TensorFlow model once at startup so first requests are fast
+    get_model()
 
 
 @app.get("/", tags=["Health"])
